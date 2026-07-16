@@ -6,213 +6,87 @@
 
 **English** | [简体中文](README_zh-CN.md)
 
-Turn an [M5Stack Chain DualKey](https://docs.m5stack.com/en/chain/Chain_DualKey) into a wireless status light for AI coding agents.
+Turn an [M5Stack Chain DualKey](https://docs.m5stack.com/en/chain/Chain_DualKey) into a wireless status light for Codex, Claude Code, and Gemini CLI.
 
-The ESP32-S3 firmware renders agent states on the DualKey's two RGB LEDs. A small host bridge keeps one persistent Bluetooth Low Energy connection open, aggregates concurrent agent sessions, and accepts fast local hook events from Codex or compatible tools. USB CDC remains available as a fallback and debugging transport.
+The firmware uses Bluetooth Low Energy by default. One background service owns the device connection, automatically installs or updates the integrations it detects, and starts whenever you sign in.
 
-## Highlights
+## What the lights mean
 
-- BLE-first operation; the USB cable is optional after flashing.
-- Persistent GATT connection instead of scanning on every hook event.
-- Codex hook adapter and installer that preserves existing hook entries.
-- Session-aware priority: `blocked > attention > working > idle`.
-- Alerts are not hidden when another agent session starts working.
-- Two local keys for acknowledgement, effect preview, and clear.
-- Shared text protocol over BLE and USB CDC.
-- PlatformIO build and automated host-side tests.
+| Lights | Meaning |
+| --- | --- |
+| Green cycle | One or more agents are working |
+| Flashing yellow | A result or notification needs attention |
+| Double-flashing red | Permission, failure, or another blocker needs action |
+| Brief green flash | The last active session completed |
+| Steady green | Idle |
+| Blue heartbeat | Waiting for the computer bridge |
+| Off | Manually cleared |
 
-## Lamp language
+## 1. Flash the DualKey firmware
 
-| LEDs | State | Meaning |
-| --- | --- | --- |
-| Both steady green | `idle` | Nothing needs attention |
-| Offset green → yellow → red cycle | `working` | The agent is thinking, editing, or running tools |
-| Both flashing yellow | `attention` | A result or notification is ready to review |
-| Both double-flashing red | `blocked` | Permission, failure, or another blocker needs action |
-| Both briefly flashing green | `complete` | A turn or session just completed |
-| Off | `off` | Manually cleared |
-| Blue heartbeat | Disconnected | The firmware is advertising and waiting for the bridge |
+1. Download `dualkey-signal-light-v0.1.0.factory.bin` from the [latest release](https://github.com/A1aZ/dualkey-signal-light/releases/latest).
+2. Move the DualKey side switch to the middle position and unplug USB-C.
+3. Hold **Key 1**, the key farther from the lanyard hole, reconnect the USB-C data cable, and then release the key.
+4. Open Espressif's [browser flasher](https://espressif.github.io/esptool-js/) in Chrome or Edge, connect to the new serial device, add the downloaded file at address `0x0`, and program it.
+5. Unplug and reconnect the DualKey without holding a key. A blue heartbeat means it is ready for the computer bridge.
 
-## Key controls
+Flashing replaces the factory firmware. The official [M5DualKey UserDemo](https://github.com/m5stack/M5DualKey-UserDemo) can be used to restore the original demo later. The firmware checksum is published in [dist/README.md](dist/README.md).
 
-- **Key 1** (farther from the lanyard hole, GPIO 0), short press: acknowledge and return to `idle`.
-- **Key 2**, short press: cycle through every lamp pattern.
-- **Both keys**, hold for 1.5 seconds: clear state and turn the LEDs off.
-- Hold **Key 1** while connecting USB: enter the ESP32-S3 ROM download mode.
+## 2. Install the computer bridge and hooks
 
-## Architecture
+Download the installer for your computer from the [latest release](https://github.com/A1aZ/dualkey-signal-light/releases/latest):
 
-```text
-Codex / compatible hooks
-          │ fast localhost UDP
-          ▼
-host/dualkey_light.py  ─── session aggregation
-          │
-          ├── BLE GATT (default)
-          └── USB CDC (fallback)
-                    │
-                    ▼
-           Chain DualKey firmware
-                    │
-                    ▼
-             2 × WS2812 LEDs
-```
+- Windows 10/11 x64: `dualkey-signal-light-0.2.0-windows-x64-setup.exe`
+- Apple silicon Mac: `dualkey-signal-light-0.2.0-macos-arm64.pkg`
+- Intel Mac: `dualkey-signal-light-0.2.0-macos-x64.pkg`
 
-## Requirements
+A one-click Linux package is not included in this release; Linux source operation is documented in the [developer guide](docs/DEVELOPMENT.md).
 
-- M5Stack Chain DualKey (C147)
-- A USB-C data cable for the initial flash
-- Python 3.10 or newer
-- Bluetooth Low Energy on the host for wireless operation
+Run the installer once. It will:
 
-The host bridge uses [Bleak](https://github.com/hbldh/bleak) and pySerial, so it can run on Windows, macOS, and Linux. The initial hardware validation for this release was performed on Windows 11.
+- install the bridge without requiring Python;
+- start one background service at login;
+- use BLE automatically, with USB as a fallback;
+- detect Codex, Claude Code, and Gemini CLI;
+- merge or update DualKey hooks while preserving unrelated hooks;
+- back up an existing hook/settings file before changing it.
 
-## Quick start
+Keep Bluetooth enabled. Normal OS-level pairing is not required. The current community installers are not code-signed. On Windows, SmartScreen may require **More info → Run anyway**. On macOS, allow Bluetooth access when prompted; if Gatekeeper blocks the unnotarized package, control-click it and choose **Open**, or allow it under **System Settings → Privacy & Security**.
 
-### 1. Clone and install the tools
+### One Codex confirmation
 
-```bash
-git clone https://github.com/A1aZ/dualkey-signal-light.git
-cd dualkey-signal-light
-```
+Codex requires non-managed user hooks to be reviewed. Open `/hooks` once, approve the DualKey hooks, and start a new Codex task. The installer writes and updates the hooks for you; this confirmation is Codex's security boundary and cannot be silently bypassed.
 
-Windows PowerShell:
+Claude Code and Gemini CLI do not require this Codex-specific confirmation. Existing agent sessions may need to be restarted after installation. If you install another supported agent later, its hooks are detected at the next sign-in or when you run the DualKey installer again.
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install platformio -r .\host\requirements.txt
-```
+## Multiple agents and sessions
 
-macOS/Linux:
+Codex, Claude Code, and Gemini CLI can all be installed and running together. They do not open separate Bluetooth connections:
 
-```bash
-python3 -m venv .venv
-./.venv/bin/python -m pip install platformio -r host/requirements.txt
-```
+- one background bridge owns the DualKey connection;
+- hook events are namespaced as `agent:session`, so identical session IDs cannot collide;
+- every active session is tracked independently;
+- the visible state is aggregated as `blocked > attention > working > idle`;
+- completing one session never hides another session that is still working or needs attention;
+- a red or yellow alert stays visible until you acknowledge it (or the agent emits a supported session-end event);
+- holding both physical keys clears all current sessions.
 
-On macOS, the first BLE scan may ask for Bluetooth access. Allow the terminal or Python process. If access was denied, enable it in **System Settings → Privacy & Security → Bluetooth**. See the [Bleak macOS backend notes](https://bleak.readthedocs.io/en/latest/backends/macos.html) and [Apple's privacy settings guide](https://support.apple.com/guide/mac-help/change-privacy-security-settings-on-mac-mchl211c911f/mac).
+This is deliberate: two LEDs cannot show every session at once, so they always show the most actionable state.
 
-### 2. Build
+## Keys
 
-```powershell
-.\.venv\Scripts\python.exe -m platformio run
-```
+- **Key 1** short press: acknowledge and return to idle.
+- **Key 2** short press: preview every light pattern.
+- **Both keys** for 1.5 seconds: clear every session and turn the LEDs off.
 
-On macOS/Linux, replace `.\.venv\Scripts\python.exe` with `./.venv/bin/python`. The application image is written to `.pio/build/dualkey/firmware.bin`.
+## Troubleshooting
 
-### 3. Enter download mode and flash
+- Blue heartbeat: the firmware is running, but the computer bridge has not connected. Check Bluetooth and reconnect USB as a fallback.
+- Agent activity has no effect: start a new agent session; for Codex, also check `/hooks` approval.
+- Windows log: `%USERPROFILE%\.dualkey-signal-light\bridge.log`
+- macOS log: `~/.dualkey-signal-light/bridge.log`
+- Re-running the installer is safe and updates the service and only the hooks managed by this project.
 
-The DualKey has no dedicated reset button. Follow the [official download-mode sequence](https://docs.m5stack.com/en/chain/Chain_DualKey):
+For source builds, architecture, protocols, tests, packaging, and adding another agent adapter, see [Developer documentation](docs/DEVELOPMENT.md).
 
-1. Move the side switch to the middle position.
-2. Disconnect USB-C.
-3. Hold **Key 1**, the key farther from the lanyard hole.
-4. Reconnect the USB-C data cable and release Key 1.
-5. Find the new serial port and upload:
-
-```powershell
-.\.venv\Scripts\python.exe -m platformio run --target upload --upload-port COM4
-```
-
-Use the actual port, such as `/dev/ttyACM0` on Linux. After flashing, disconnect and reconnect USB without holding either key.
-
-On macOS, the DualKey normally appears as `/dev/cu.usbmodem*`:
-
-```bash
-ls /dev/cu.usbmodem*
-./.venv/bin/python -m platformio run --target upload --upload-port /dev/cu.usbmodemXXXX
-```
-
-> Flashing replaces the factory firmware. To restore it, use the [official M5DualKey UserDemo](https://github.com/m5stack/M5DualKey-UserDemo) or M5Burner.
-
-A merged factory image for the DualKey's 8 MB flash is also attached to each [GitHub Release](https://github.com/A1aZ/dualkey-signal-light/releases). Flash that image at offset `0x0`; checksums are documented in [dist/README.md](dist/README.md).
-
-### 4. Start the BLE bridge
-
-The device advertises as `DualKey Signal Light`. OS-level pairing is not required for the default unencrypted GATT connection.
-
-```powershell
-.\.venv\Scripts\python.exe .\host\dualkey_light.py serve --transport ble
-```
-
-macOS/Linux:
-
-```bash
-./.venv/bin/python host/dualkey_light.py serve --transport ble
-```
-
-Keep the bridge running, then use another terminal to test it:
-
-```powershell
-.\.venv\Scripts\python.exe .\host\dualkey_light.py set working
-.\.venv\Scripts\python.exe .\host\dualkey_light.py set attention
-.\.venv\Scripts\python.exe .\host\dualkey_light.py set blocked
-.\.venv\Scripts\python.exe .\host\dualkey_light.py set idle
-.\.venv\Scripts\python.exe .\host\dualkey_light.py status
-```
-
-Use `--ble-address <address>` to pin a device. On macOS, CoreBluetooth exposes a host-specific UUID instead of the hardware MAC address, so name-based auto-discovery is usually the simplest option. USB fallback mode is:
-
-```powershell
-.\.venv\Scripts\python.exe .\host\dualkey_light.py serve --transport usb --serial-port COM5
-```
-
-On macOS, use `./.venv/bin/python host/dualkey_light.py serve --transport usb --serial-port /dev/cu.usbmodemXXXX`.
-
-`--transport auto` tries BLE first and then USB.
-
-### 5. Install Codex hooks
-
-After confirming that the bridge controls the LEDs:
-
-```powershell
-.\.venv\Scripts\python.exe .\host\dualkey_light.py install-hooks
-```
-
-The installer merges entries into `~/.codex/hooks.json`, preserves unrelated hooks, and creates a timestamped backup before changing an existing file. Restart Codex tasks after installation so the new hook configuration is loaded.
-
-Hook calls are lightweight UDP clients with a 350 ms ceiling. If the bridge is unavailable, the hook prints a warning but does not fail the agent.
-
-## BLE and USB protocol
-
-Both transports accept UTF-8 text commands:
-
-```text
-STATE idle|working|attention|blocked|complete|off
-BRIGHTNESS 1..255
-STATUS
-PING
-```
-
-BLE UUIDs:
-
-- Service: `7b7f3d10-7d20-4b8e-a2d7-4d55414c0001`
-- RX / Write: `7b7f3d10-7d20-4b8e-a2d7-4d55414c0002`
-- TX / Notify: `7b7f3d10-7d20-4b8e-a2d7-4d55414c0003`
-
-## Development and verification
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest discover -s .\host\tests -v
-.\.venv\Scripts\python.exe -m platformio run
-```
-
-GitHub Actions runs the host dependency/import checks, command-line smoke test, and unit tests on Ubuntu, Windows, and macOS. The firmware build runs on Ubuntu. Physical BLE and USB validation for v0.1.0 was performed on Windows 11; the macOS path uses Bleak's CoreBluetooth backend and is continuously checked on `macos-latest`.
-
-The firmware follows the official pin map: GPIO 21 drives the two WS2812 LEDs, GPIO 40 is an active-low open-drain LED power enable, and GPIO 8/7 are never configured as outputs.
-
-## Security and USB identity
-
-The BLE service is intentionally unencrypted and carries only lamp-control/status messages. Do not extend the current protocol with secrets without adding authentication and encryption.
-
-The firmware uses Espressif VID `0x303A` with a development PID `0x4010` so the host bridge can distinguish it from ROM download mode. This is suitable for development, not an assigned USB identity for a commercial product. Products must use properly assigned USB identifiers.
-
-## Acknowledgements
-
-The physical-agent-status concept and compact lamp language were inspired by [starlight36/vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light), an MIT-licensed project for a real traffic light driven by local AI coding agents. This repository is a new implementation for the Chain DualKey's ESP32-S3, RGB LEDs, keys, BLE GATT, and USB CDC hardware. See [ACKNOWLEDGMENTS.md](ACKNOWLEDGMENTS.md).
-
-Hardware details and the download procedure come from the [M5Stack Chain DualKey documentation](https://docs.m5stack.com/en/chain/Chain_DualKey) and [official UserDemo](https://github.com/m5stack/M5DualKey-UserDemo).
-
-## License
-
-Original code in this repository is licensed under the [MIT License](LICENSE). Third-party dependencies retain their respective licenses; see [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Inspired by [starlight36/vibecoding-signal-light](https://github.com/starlight36/vibecoding-signal-light). Original project code is licensed under the [MIT License](LICENSE); third-party notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

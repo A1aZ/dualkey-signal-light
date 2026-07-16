@@ -17,4 +17,13 @@ Direct host dependencies declared in `host/requirements.txt`:
 | Bleak | `>=1.0.1,<3` | MIT | [hbldh/bleak](https://github.com/hbldh/bleak) |
 | pySerial | `>=3.5,<4` | BSD-3-Clause | [pyserial/pyserial](https://github.com/pyserial/pyserial) |
 
+Distribution build tools:
+
+| Component | Version | License | Source |
+| --- | --- | --- | --- |
+| PyInstaller | `6.21.0` | GPL-2.0 with the PyInstaller bootloader exception; selected files are Apache-2.0 | [PyInstaller license](https://pyinstaller.org/en/stable/license.html) |
+| Inno Setup | 6.x | Inno Setup License | [Inno Setup license](https://jrsoftware.org/files/is/license.txt) |
+
+PyInstaller's exception permits distributing generated bundles under this project's license, subject to the licenses of bundled dependencies. Inno Setup is used only to produce the Windows installer and retains its own notices in the generated installer runtime.
+
 The exact source and license files for resolved firmware dependencies are downloaded into PlatformIO's package and library directories during a build. Redistributors of compiled firmware must comply with all applicable third-party license terms.
