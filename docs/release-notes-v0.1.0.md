@@ -14,7 +14,7 @@ Initial public release for the M5Stack Chain DualKey (C147).
 
 ## Firmware
 
-`dualkey-signal-light-v0.1.0.factory.bin` is an 8 MB merged factory image. Flash it at offset `0x0`. Verify the download with the attached `SHA256SUMS` file.
+`dualkey-signal-light-v0.1.0.factory.bin` is a merged factory image for the DualKey's 8 MB flash. Flash it at offset `0x0`. Verify the download with the attached `SHA256SUMS` file.
 
 Physical BLE and USB validation for this release was performed on Windows 11 with a Chain DualKey. The macOS host path uses Bleak's CoreBluetooth backend and is covered by the `macos-latest` CI job.
 

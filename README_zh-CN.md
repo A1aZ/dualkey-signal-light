@@ -125,7 +125,7 @@ ls /dev/cu.usbmodem*
 
 > 刷写会覆盖出厂固件。需要恢复时可使用 [M5Stack 官方 UserDemo](https://github.com/m5stack/M5DualKey-UserDemo) 或 M5Burner。
 
-每个 [GitHub Release](https://github.com/A1aZ/dualkey-signal-light/releases) 也附带从 `0x0` 写入的 8 MB 合并镜像，校验值见 [dist/README.md](dist/README.md)。
+每个 [GitHub Release](https://github.com/A1aZ/dualkey-signal-light/releases) 也附带适用于 DualKey 8 MB Flash、从 `0x0` 写入的合并镜像，校验值见 [dist/README.md](dist/README.md)。
 
 ### 4. 启动 BLE 桥接
 

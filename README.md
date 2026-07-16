@@ -125,7 +125,7 @@ ls /dev/cu.usbmodem*
 
 > Flashing replaces the factory firmware. To restore it, use the [official M5DualKey UserDemo](https://github.com/m5stack/M5DualKey-UserDemo) or M5Burner.
 
-A merged 8 MB factory image is also attached to each [GitHub Release](https://github.com/A1aZ/dualkey-signal-light/releases). Flash that image at offset `0x0`; checksums are documented in [dist/README.md](dist/README.md).
+A merged factory image for the DualKey's 8 MB flash is also attached to each [GitHub Release](https://github.com/A1aZ/dualkey-signal-light/releases). Flash that image at offset `0x0`; checksums are documented in [dist/README.md](dist/README.md).
 
 ### 4. Start the BLE bridge
 
