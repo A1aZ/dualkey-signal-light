@@ -36,9 +36,9 @@ Flashing replaces the factory firmware. The official [M5DualKey UserDemo](https:
 
 Download the installer for your computer from the [latest release](https://github.com/A1aZ/dualkey-signal-light/releases/latest):
 
-- Windows 10/11 x64: `dualkey-signal-light-0.2.0-windows-x64-setup.exe`
-- Apple silicon Mac: `dualkey-signal-light-0.2.0-macos-arm64.pkg`
-- Intel Mac: `dualkey-signal-light-0.2.0-macos-x64.pkg`
+- Windows 10/11 x64: `dualkey-signal-light-0.2.1-windows-x64-setup.exe`
+- Apple silicon Mac: `dualkey-signal-light-0.2.1-macos-arm64.pkg`
+- Intel Mac: `dualkey-signal-light-0.2.1-macos-x64.pkg`
 
 A one-click Linux package is not included in this release; Linux source operation is documented in the [developer guide](docs/DEVELOPMENT.md).
 
@@ -60,13 +60,13 @@ Only override the warning when the installer came from this repository's [offici
 Windows PowerShell:
 
 ```powershell
-Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.0-windows-x64-setup.exe" -Algorithm SHA256
+Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.1-windows-x64-setup.exe" -Algorithm SHA256
 ```
 
 macOS Terminal:
 
 ```bash
-shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.0-macos-*.pkg
+shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.1-macos-*.pkg
 ```
 
 Windows 10/11:

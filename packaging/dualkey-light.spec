@@ -12,7 +12,7 @@ backend_module = {
 }.get(sys.platform, "bleak.backends.bluezdbus")
 hidden_imports = collect_submodules(backend_module)
 project_root = os.path.abspath(os.path.join(SPECPATH, ".."))
-app_version = os.environ.get("APP_VERSION", "0.2.0")
+app_version = os.environ.get("APP_VERSION", "0.2.1")
 
 analysis = Analysis(
     [os.path.join(project_root, "host", "dualkey_light.py")],

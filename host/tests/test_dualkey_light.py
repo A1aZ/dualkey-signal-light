@@ -1,4 +1,6 @@
+import errno
 import importlib.util
+import io
 import json
 from pathlib import Path
 import sys
@@ -14,6 +16,8 @@ dualkey_light = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = dualkey_light
 assert SPEC.loader is not None
 SPEC.loader.exec_module(dualkey_light)
+
+import integrations  # noqa: E402  (import after sys.path setup above)
 
 
 class HookMappingTests(unittest.TestCase):
@@ -306,6 +310,202 @@ class MultiAgentIntegrationTests(unittest.TestCase):
                 dualkey_light.reconcile_integrations(
                     "unknown", home=Path(directory), command="dualkey-light hook"
                 )
+
+
+class HookEnvelopeTests(unittest.TestCase):
+    """build_hook_envelope must keep the wire payload small and safe."""
+
+    def test_large_write_pretooluse_payload_is_bounded_and_drops_content(self):
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "session_id": "abc",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/big.txt", "content": "x" * 70_000},
+        }
+        envelope = dualkey_light.build_hook_envelope(payload)
+        encoded = json.dumps(envelope, ensure_ascii=False)
+
+        self.assertLessEqual(len(encoded.encode("utf-8")), dualkey_light.MAX_HOOK_ENVELOPE_BYTES)
+        self.assertEqual(envelope.get("tool_name"), "Write")
+        self.assertNotIn("tool_input", envelope)
+        self.assertNotIn("content", encoded)
+        self.assertNotIn("file_path", encoded)
+
+    def test_explicit_signal_survives_alongside_large_unrelated_fields(self):
+        payload = {"signal": "attention", "prompt": "p" * 10_000}
+        envelope = dualkey_light.build_hook_envelope(payload)
+
+        self.assertEqual(envelope.get("signal"), "attention")
+        self.assertNotIn("prompt", envelope)
+        decision = dualkey_light.choose_hook_action("Notification", envelope)
+        self.assertEqual(decision, dualkey_light.HookDecision("set", "attention"))
+
+    def test_nested_failure_marker_survives_alongside_large_output(self):
+        payload = {"tool": {"exit_status": 2}, "output": "z" * 20_000}
+        envelope = dualkey_light.build_hook_envelope(payload)
+
+        self.assertEqual(envelope.get("exit_status"), 2)
+        decision = dualkey_light.choose_hook_action("PostToolUse", envelope)
+        self.assertEqual(decision.state, "blocked")
+
+    def test_nested_nonzero_exit_overrides_outer_zero(self):
+        payload = {
+            "exit_status": 0,
+            "tool_response": {"command": {"exit_status": 2}},
+        }
+        envelope = dualkey_light.build_hook_envelope(payload)
+
+        self.assertEqual(envelope["exit_status"], 2)
+        self.assertEqual(
+            dualkey_light.choose_hook_action("PostToolUse", envelope).state,
+            "blocked",
+        )
+
+    def test_failure_keys_are_matched_case_insensitively(self):
+        envelope = dualkey_light.build_hook_envelope({"Status": "failed"})
+
+        self.assertEqual(envelope, {"status": "failed"})
+        self.assertEqual(
+            dualkey_light.choose_hook_action("PostToolUse", envelope).state,
+            "blocked",
+        )
+
+    def test_error_presence_becomes_boolean_without_forwarding_message(self):
+        payload = {"error": "secret path and response body"}
+        envelope = dualkey_light.build_hook_envelope(payload)
+
+        self.assertEqual(envelope, {"error": True})
+        self.assertNotIn("secret", json.dumps(envelope))
+        self.assertEqual(
+            dualkey_light.choose_hook_action("PostToolUse", envelope).state,
+            "blocked",
+        )
+
+    def test_success_result_text_is_not_forwarded_or_misclassified(self):
+        payload = {"result": "a successful user-visible tool response"}
+        envelope = dualkey_light.build_hook_envelope(payload)
+
+        self.assertNotIn("result", envelope)
+        self.assertEqual(
+            dualkey_light.choose_hook_action("PostToolUse", envelope).state,
+            "working",
+        )
+
+    def test_small_payload_behavior_is_unchanged(self):
+        payload = {"hook_event_name": "PreToolUse", "session_id": "s1"}
+        envelope = dualkey_light.build_hook_envelope(payload)
+        event = dualkey_light.event_from_payload(payload)
+
+        self.assertEqual(event, "PreToolUse")
+        decision = dualkey_light.choose_hook_action(event, envelope)
+        self.assertEqual(decision, dualkey_light.HookDecision("set", "working"))
+
+
+class _FakeHookSocket:
+    """A minimal stand-in for a UDP socket used by the `hook` CLI command."""
+
+    def __init__(self, sent: dict, sendto_exc: Exception | None, response: dict | None):
+        self._sent = sent
+        self._sendto_exc = sendto_exc
+        self._response = response if response is not None else {"ok": True}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        return False
+
+    def settimeout(self, timeout):
+        pass
+
+    def sendto(self, data, address):
+        self._sent["data"] = data
+        if self._sendto_exc is not None:
+            raise self._sendto_exc
+
+    def recvfrom(self, bufsize):
+        return json.dumps(self._response).encode("utf-8"), ("127.0.0.1", 0)
+
+
+class HookTransportHardeningTests(unittest.TestCase):
+    """End-to-end `hook` CLI command tests covering the UDP transport."""
+
+    def _run_hook(self, argv, stdin_payload, sendto_exc=None, response=None):
+        sent: dict = {}
+        fake_socket = _FakeHookSocket(sent, sendto_exc, response)
+        with mock.patch("dualkey_light.socket.socket", return_value=fake_socket), mock.patch(
+            "sys.stdin", io.StringIO(json.dumps(stdin_payload))
+        ):
+            exit_code = dualkey_light.main(argv)
+        return exit_code, sent.get("data")
+
+    def test_large_session_id_is_stable_and_bounded_on_wire(self):
+        payload = {"hook_event_name": "Stop", "session_id": "s" * 100_000}
+        first_code, first_sent = self._run_hook(["hook", "--agent", "claude"], payload)
+        second_code, second_sent = self._run_hook(["hook", "--agent", "claude"], payload)
+
+        self.assertEqual((first_code, second_code), (0, 0))
+        self.assertLess(len(first_sent), 1024)
+        self.assertEqual(
+            json.loads(first_sent.decode())["session"],
+            json.loads(second_sent.decode())["session"],
+        )
+
+    def test_oversized_numeric_exit_status_is_bounded_and_fails_open(self):
+        payload = {"hook_event_name": "PostToolUse", "exit_status": "9" * 100_000}
+        exit_code, sent = self._run_hook(["hook", "--agent", "claude"], payload)
+
+        self.assertEqual(exit_code, 0)
+        request = json.loads(sent.decode())
+        self.assertEqual(request["payload"]["exit_status"], 1)
+
+    def test_malformed_response_fails_open_and_returns_zero(self):
+        class MalformedResponseSocket(_FakeHookSocket):
+            def recvfrom(self, bufsize):
+                return b"not-json", ("127.0.0.1", 0)
+
+        payload = {"hook_event_name": "Stop"}
+        sent: dict = {}
+        fake_socket = MalformedResponseSocket(sent, None, None)
+        with mock.patch("dualkey_light.socket.socket", return_value=fake_socket), mock.patch(
+            "sys.stdin", io.StringIO(json.dumps(payload))
+        ):
+            exit_code = dualkey_light.main(["hook", "--agent", "claude"])
+
+        self.assertEqual(exit_code, 0)
+
+    def test_large_write_payload_stays_bounded_over_the_wire(self):
+        payload = {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/tmp/x", "content": "a" * 70_000},
+        }
+        exit_code, sent = self._run_hook(["hook", "--agent", "claude"], payload)
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(sent)
+        self.assertLess(len(sent), dualkey_light.MAX_HOOK_ENVELOPE_BYTES + 512)
+        self.assertNotIn(b"a" * 100, sent)
+
+    def test_emsgsize_on_sendto_fails_open_and_returns_zero(self):
+        payload = {"hook_event_name": "Stop"}
+        too_long = OSError(errno.EMSGSIZE, "Message too long")
+
+        exit_code, sent = self._run_hook(
+            ["hook", "--agent", "claude"], payload, sendto_exc=too_long
+        )
+
+        self.assertEqual(exit_code, 0)
+        self.assertIsNotNone(sent)
+
+    def test_small_payload_round_trips_and_returns_zero(self):
+        payload = {"hook_event_name": "PreToolUse", "session_id": "s1"}
+        exit_code, sent = self._run_hook(["hook", "--agent", "claude"], payload)
+
+        self.assertEqual(exit_code, 0)
+        request = json.loads(sent.decode("utf-8"))
+        self.assertEqual(request["event"], "PreToolUse")
+        self.assertEqual(request["session"], "claude:s1")
 
 
 class PlatformMessageTests(unittest.TestCase):

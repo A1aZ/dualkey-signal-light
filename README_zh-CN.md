@@ -36,9 +36,9 @@
 
 从[最新 Release](https://github.com/A1aZ/dualkey-signal-light/releases/latest)下载与你电脑对应的安装包：
 
-- Windows 10/11 x64：`dualkey-signal-light-0.2.0-windows-x64-setup.exe`
-- Apple 芯片 Mac：`dualkey-signal-light-0.2.0-macos-arm64.pkg`
-- Intel Mac：`dualkey-signal-light-0.2.0-macos-x64.pkg`
+- Windows 10/11 x64：`dualkey-signal-light-0.2.1-windows-x64-setup.exe`
+- Apple 芯片 Mac：`dualkey-signal-light-0.2.1-macos-arm64.pkg`
+- Intel Mac：`dualkey-signal-light-0.2.1-macos-x64.pkg`
 
 这个版本暂未提供 Linux 一键安装包；Linux 源码运行方式见[开发文档](docs/DEVELOPMENT.md)。
 
@@ -60,13 +60,13 @@
 Windows PowerShell：
 
 ```powershell
-Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.0-windows-x64-setup.exe" -Algorithm SHA256
+Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.1-windows-x64-setup.exe" -Algorithm SHA256
 ```
 
 macOS 终端：
 
 ```bash
-shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.0-macos-*.pkg
+shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.1-macos-*.pkg
 ```
 
 Windows 10/11：
