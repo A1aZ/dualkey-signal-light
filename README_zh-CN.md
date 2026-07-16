@@ -51,7 +51,42 @@
 - 合并或更新 DualKey Hooks，不覆盖其他 Hooks；
 - 修改已有配置前自动创建备份。
 
-请保持蓝牙开启，不需要先在系统蓝牙设置里手动配对。目前的社区版安装包尚未代码签名：Windows SmartScreen 拦截时请选择**更多信息 → 仍要运行**；macOS 首次使用时请允许蓝牙权限，如果 Gatekeeper 拦截尚未公证的安装包，请按住 Control 点击并选择**打开**，或前往**系统设置 → 隐私与安全性**允许打开。
+请保持蓝牙开启，不需要先在系统蓝牙设置里手动配对。目前的社区版安装包尚未代码签名，因此 Windows SmartScreen 或 macOS Gatekeeper 可能会拦截首次运行。
+
+### 安装包被操作系统拦截时
+
+只有在安装包来自本仓库的[官方 Release](https://github.com/A1aZ/dualkey-signal-light/releases/latest)，并且 SHA-256 与 Release 中的 [`SHA256SUMS`](https://github.com/A1aZ/dualkey-signal-light/releases/latest/download/SHA256SUMS) 一致时，才应继续放行。
+
+Windows PowerShell：
+
+```powershell
+Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.0-windows-x64-setup.exe" -Algorithm SHA256
+```
+
+macOS 终端：
+
+```bash
+shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.0-macos-*.pkg
+```
+
+Windows 10/11：
+
+1. 打开下载的 `.exe`。
+2. 出现“Windows 已保护你的电脑”时，点击**更多信息**。
+3. 确认文件名就是刚下载的安装包，然后点击**仍要运行**。
+4. 如果系统没有显示**仍要运行**，不要全局关闭安全功能。这台电脑可能受组织管理，或启用了更严格的 Smart App Control；请联系管理员，或使用开发文档中的源码安装方式。
+
+相关说明见 [Microsoft 的 SmartScreen 与应用保护文档](https://support.microsoft.com/zh-cn/windows/security/threat-malware-protection/protect-your-pc-from-unwanted-software)。
+
+macOS：
+
+1. 先尝试打开下载的 `.pkg` 一次，让 macOS 记录被拦截的安装包。
+2. 打开**苹果菜单 → 系统设置 → 隐私与安全性**。
+3. 向下滚动到**安全性**，在被拦截的安装包旁点击**仍要打开**。
+4. 输入登录密码或使用 Touch ID，确认**打开**，然后完成安装。
+5. DualKey Signal Light 首次启动时，请允许它访问蓝牙。
+
+Apple 说明，**仍要打开**通常只会在被拦截后约一小时内显示。如果是受组织管理的 Mac，这个选项可能被禁用；请联系管理员，不要关闭 Gatekeeper。具体步骤见 [Apple 官方说明](https://support.apple.com/zh-cn/guide/mac-help-cn/mh40617/mac)。
 
 ### Codex 需要确认一次
 

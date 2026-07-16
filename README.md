@@ -51,7 +51,42 @@ Run the installer once. It will:
 - merge or update DualKey hooks while preserving unrelated hooks;
 - back up an existing hook/settings file before changing it.
 
-Keep Bluetooth enabled. Normal OS-level pairing is not required. The current community installers are not code-signed. On Windows, SmartScreen may require **More info → Run anyway**. On macOS, allow Bluetooth access when prompted; if Gatekeeper blocks the unnotarized package, control-click it and choose **Open**, or allow it under **System Settings → Privacy & Security**.
+Keep Bluetooth enabled. Normal OS-level pairing is not required. The current community installers are not code-signed, so Windows SmartScreen or macOS Gatekeeper may stop the first launch.
+
+### If the operating system blocks the installer
+
+Only override the warning when the installer came from this repository's [official release](https://github.com/A1aZ/dualkey-signal-light/releases/latest). Compare its SHA-256 with the release's [`SHA256SUMS`](https://github.com/A1aZ/dualkey-signal-light/releases/latest/download/SHA256SUMS) before continuing.
+
+Windows PowerShell:
+
+```powershell
+Get-FileHash "$HOME\Downloads\dualkey-signal-light-0.2.0-windows-x64-setup.exe" -Algorithm SHA256
+```
+
+macOS Terminal:
+
+```bash
+shasum -a 256 ~/Downloads/dualkey-signal-light-0.2.0-macos-*.pkg
+```
+
+Windows 10/11:
+
+1. Open the downloaded `.exe`.
+2. If **Windows protected your PC** appears, select **More info**.
+3. Confirm that the filename is the installer you downloaded, then select **Run anyway**.
+4. If Windows does not offer **Run anyway**, do not disable system security globally. The computer may be managed or using a stricter Smart App Control policy; contact its administrator or use the source installation in the developer guide.
+
+See [Microsoft's SmartScreen and app-protection overview](https://support.microsoft.com/en-US/Windows/Security/Threat-Malware-Protection/protect-your-pc-from-unwanted-software).
+
+macOS:
+
+1. Try to open the downloaded `.pkg` once so macOS records the blocked installer.
+2. Open **Apple menu → System Settings → Privacy & Security**.
+3. Scroll to **Security** and select **Open Anyway** beside the blocked installer.
+4. Authenticate, confirm **Open**, and finish the installer.
+5. When DualKey Signal Light starts for the first time, allow Bluetooth access.
+
+Apple notes that **Open Anyway** is available for about one hour after the blocked launch. On a managed Mac the option may be disabled; contact the administrator instead of weakening Gatekeeper. See [Apple's official instructions](https://support.apple.com/guide/mac-help/open-an-app-by-overriding-security-settings-mh40617/mac).
 
 ### One Codex confirmation
 
