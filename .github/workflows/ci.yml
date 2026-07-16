@@ -12,6 +12,9 @@ concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
 
+env:
+  APP_VERSION: "0.2.0"
+
 jobs:
   host-tests:
     name: Host tests (${{ matrix.os }})
@@ -68,3 +71,126 @@ jobs:
 
       - name: Build firmware
         run: python -m platformio run
+
+  windows-installer:
+    name: Windows installer
+    runs-on: windows-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            host/requirements.txt
+            packaging/requirements.txt
+
+      - name: Install packaging dependencies
+        run: python -m pip install -r host/requirements.txt -r packaging/requirements.txt
+
+      - name: Build host bundle
+        run: python -m PyInstaller --noconfirm --clean --distpath build/package --workpath build/pyinstaller packaging/dualkey-light.spec
+
+      - name: Smoke-test host bundle
+        shell: pwsh
+        run: |
+          $bundle = (Resolve-Path build/package/dualkey-light).Path
+          & "$bundle/dualkey-light.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $process = Start-Process -FilePath "$bundle/dualkey-light-service.exe" -ArgumentList @("serve", "--transport", "auto", "--log-file", "$env:RUNNER_TEMP/dualkey.log") -WindowStyle Hidden -PassThru
+          try {
+            $ready = $false
+            for ($i = 0; $i -lt 20; $i++) {
+              Start-Sleep -Milliseconds 250
+              & "$bundle/dualkey-light.exe" status *> $null
+              if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            }
+            if (-not $ready) { throw "Bundled bridge did not start" }
+            & "$bundle/dualkey-light.exe" serve --transport auto --log-file "$env:RUNNER_TEMP/dualkey.log"
+            if ($LASTEXITCODE -ne 0) { throw "A duplicate bridge did not exit cleanly" }
+            & "$bundle/dualkey-light.exe" shutdown
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+          finally {
+            if (-not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+          }
+
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      - name: Build setup executable
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" "/DAppVersion=$env:APP_VERSION" "packaging\windows\dualkey-signal-light.iss"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: dualkey-signal-light-windows-x64
+          path: build/installers/dualkey-signal-light-${{ env.APP_VERSION }}-windows-x64-setup.exe
+          if-no-files-found: error
+
+  macos-installer:
+    name: macOS installer (${{ matrix.arch }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            arch: arm64
+            uname_arch: arm64
+          - os: macos-15-intel
+            arch: x64
+            uname_arch: x86_64
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            host/requirements.txt
+            packaging/requirements.txt
+
+      - name: Install packaging dependencies
+        run: python -m pip install -r host/requirements.txt -r packaging/requirements.txt
+
+      - name: Build host bundle
+        run: python -m PyInstaller --noconfirm --clean --distpath build/package --workpath build/pyinstaller packaging/dualkey-light.spec
+
+      - name: Smoke-test host bundle
+        run: |
+          app="build/package/DualKey Signal Light.app"
+          "$app/Contents/MacOS/dualkey-light" --version
+          /usr/libexec/PlistBuddy -c 'Print :NSBluetoothAlwaysUsageDescription' "$app/Contents/Info.plist"
+          test "$(uname -m)" = "${{ matrix.uname_arch }}"
+
+      - name: Build installer package
+        run: |
+          chmod +x packaging/macos/build-pkg.sh packaging/macos/scripts/preinstall packaging/macos/scripts/postinstall
+          packaging/macos/build-pkg.sh \
+            "build/package/DualKey Signal Light.app" \
+            build/installers/dualkey-signal-light-${APP_VERSION}-macos-${{ matrix.arch }}.pkg \
+            "${APP_VERSION}"
+          payload="$(pkgutil --payload-files build/installers/dualkey-signal-light-${APP_VERSION}-macos-${{ matrix.arch }}.pkg)"
+          grep 'Applications/DualKey Signal Light.app/Contents/Info.plist' <<< "$payload"
+          grep 'usr/local/bin/dualkey-light' <<< "$payload"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v7
+        with:
+          name: dualkey-signal-light-macos-${{ matrix.arch }}
+          path: build/installers/dualkey-signal-light-${{ env.APP_VERSION }}-macos-${{ matrix.arch }}.pkg
+          if-no-files-found: error

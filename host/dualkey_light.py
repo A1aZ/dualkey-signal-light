@@ -6,19 +6,25 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
+from logging.handlers import RotatingFileHandler
 import os
 from pathlib import Path
-import shlex
 import socket
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any, Callable
 
+from integrations import (
+    CODEX_EVENTS,
+    detect_agents,
+    install_codex_hooks,
+    reconcile_integrations,
+)
 
-VERSION = "0.1.0"
+
+VERSION = "0.2.0"
 DEVICE_NAME = "DualKey Signal Light"
 SERVICE_UUID = "7b7f3d10-7d20-4b8e-a2d7-4d55414c0001"
 RX_UUID = "7b7f3d10-7d20-4b8e-a2d7-4d55414c0002"
@@ -34,8 +40,12 @@ EVENT_STATE = {
     "SessionStart": "idle",
     "UserPromptSubmit": "working",
     "PreToolUse": "working",
+    "BeforeAgent": "working",
+    "BeforeTool": "working",
     "PostToolUse": "working",
+    "AfterTool": "working",
     "PreCompact": "working",
+    "PreCompress": "working",
     "SubagentStart": "working",
     "SubagentStop": "working",
     "PostToolUseFailure": "blocked",
@@ -43,19 +53,37 @@ EVENT_STATE = {
     "Notification": "attention",
 }
 
-CODEX_EVENTS = (
-    "SessionStart",
-    "UserPromptSubmit",
-    "PreToolUse",
-    "PostToolUse",
-    "PermissionRequest",
-    "Stop",
-    "SessionEnd",
-)
+STATE_DIR = Path.home() / ".dualkey-signal-light"
+LOGGER = logging.getLogger("dualkey-signal-light")
 
 
 class BridgeError(RuntimeError):
     """A concise, user-facing bridge error."""
+
+
+def configure_logging(log_file: Path | None) -> None:
+    LOGGER.setLevel(logging.INFO)
+    LOGGER.handlers.clear()
+    formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        handler: logging.Handler = RotatingFileHandler(
+            log_file, maxBytes=1_000_000, backupCount=2, encoding="utf-8"
+        )
+    else:
+        handler = logging.StreamHandler()
+    handler.setFormatter(formatter)
+    LOGGER.addHandler(handler)
+
+
+def console_write(message: str, *, error: bool = False) -> None:
+    stream = sys.stderr if error else sys.stdout
+    if stream is not None:
+        print(message, file=stream)
+    elif error:
+        LOGGER.error(message)
+    else:
+        LOGGER.info(message)
 
 
 def describe_ble_error(exc: Exception, platform: str | None = None) -> str:
@@ -71,7 +99,8 @@ def describe_ble_error(exc: Exception, platform: str | None = None) -> str:
         suffix = f" ({detail})" if detail else ""
         return (
             "Bluetooth is unavailable or permission was denied on macOS. Enable "
-            "Terminal or Python in System Settings > Privacy & Security > Bluetooth"
+            "DualKey Signal Light (or Terminal/Python for source builds) in System "
+            "Settings > Privacy & Security > Bluetooth"
             f"{suffix}"
         )
     return detail or error_name
@@ -150,7 +179,7 @@ def choose_hook_action(event: str, payload: dict[str, Any]) -> HookDecision:
         return HookDecision("set", explicit.lower())
     if payload_indicates_failure(payload):
         return HookDecision("set", "blocked")
-    if event == "Stop":
+    if event in {"Stop", "AfterAgent"}:
         return HookDecision("turn_end")
     if event == "SessionEnd":
         return HookDecision("session_end")
@@ -361,7 +390,7 @@ class DeviceWriter:
         self.desired_state = state
 
     def _on_notification(self, message: str) -> None:
-        print(f"[device] {message}", flush=True)
+        LOGGER.info("[device] %s", message)
         if message.startswith("EVENT ") and self.device_event_handler:
             self.device_event_handler(message)
 
@@ -381,7 +410,7 @@ class DeviceWriter:
                 await candidate.connect()
                 self.adapter = candidate
                 self.last_error = None
-                print(f"Connected to {DEVICE_NAME} over {candidate.name}.", flush=True)
+                LOGGER.info("Connected to %s over %s.", DEVICE_NAME, candidate.name)
                 return True
             except Exception as exc:  # Hardware/backend errors should trigger fallback.
                 self.last_error = str(exc)
@@ -399,7 +428,7 @@ class DeviceWriter:
             if not self.connected:
                 last_sent = None
                 if not await self._connect():
-                    print(f"Waiting for device: {self.last_error}", file=sys.stderr, flush=True)
+                    LOGGER.warning("Waiting for device: %s", self.last_error)
                     await asyncio.sleep(2.0)
                     continue
 
@@ -428,10 +457,15 @@ class DeviceWriter:
 
 
 class Bridge:
-    def __init__(self, writer: DeviceWriter) -> None:
+    def __init__(
+        self,
+        writer: DeviceWriter,
+        shutdown_callback: Callable[[], None] | None = None,
+    ) -> None:
         self.writer = writer
         self.store = SessionStore()
         self.completion_generation = 0
+        self.shutdown_callback = shutdown_callback
         self.writer.device_event_handler = self.handle_device_event
 
     def handle_device_event(self, message: str) -> None:
@@ -462,11 +496,14 @@ class Bridge:
             event = str(request.get("event") or event_from_payload(payload) or "Stop")
             session = str(request.get("session") or session_from_payload(payload))
             decision = choose_hook_action(event, payload)
-            if self.store.apply(session, decision):
+            play_completion = self.store.apply(session, decision)
+            aggregate = self.store.aggregate()
+            # A completion pulse is lower priority than every active session.
+            if play_completion and aggregate == "idle":
                 self._play_completion()
             else:
                 self.completion_generation += 1
-                self._set_aggregate()
+                self.writer.set_state(aggregate)
             return {"ok": True, "event": event, "session": session, "display": self.writer.desired_state}
 
         if operation == "set":
@@ -494,6 +531,11 @@ class Bridge:
                 "sessions": self.store.snapshot(),
                 "last_error": self.writer.last_error,
             }
+
+        if operation == "shutdown":
+            if self.shutdown_callback:
+                self.shutdown_callback()
+            return {"ok": True, "shutting_down": True}
 
         raise BridgeError(f"unknown operation: {operation}")
 
@@ -534,7 +576,7 @@ def send_request(request: dict[str, Any], host: str, port: int, timeout: float) 
 
 
 def read_stdin_payload() -> dict[str, Any]:
-    if sys.stdin.isatty():
+    if sys.stdin is None or sys.stdin.isatty():
         return {}
     raw = sys.stdin.read().strip()
     if not raw:
@@ -546,71 +588,42 @@ def read_stdin_payload() -> dict[str, Any]:
         return {"raw": raw}
 
 
-def hook_command(event: str) -> str:
-    parts = [str(Path(sys.executable).resolve()), str(Path(__file__).resolve()), "hook", event]
-    return subprocess.list2cmdline(parts) if os.name == "nt" else shlex.join(parts)
-
-
-def install_codex_hooks(path: Path) -> tuple[Path | None, int]:
-    data: dict[str, Any]
-    if path.exists():
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
-            raise BridgeError(f"cannot read existing hooks file: {exc}") from exc
-        if not isinstance(data, dict):
-            raise BridgeError("existing hooks.json is not a JSON object")
-    else:
-        data = {}
-
-    hooks = data.setdefault("hooks", {})
-    if not isinstance(hooks, dict):
-        raise BridgeError('existing hooks.json field "hooks" is not an object')
-
-    added = 0
-    for event in CODEX_EVENTS:
-        event_entries = hooks.setdefault(event, [])
-        if not isinstance(event_entries, list):
-            raise BridgeError(f'existing hook event "{event}" is not a list')
-        command = hook_command(event)
-        already_present = any(
-            isinstance(group, dict)
-            and any(
-                isinstance(item, dict) and item.get("command") == command
-                for item in group.get("hooks", [])
-            )
-            for group in event_entries
-        )
-        if not already_present:
-            event_entries.append(
-                {"hooks": [{"type": "command", "command": command, "timeout": 5}]}
-            )
-            added += 1
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    backup: Path | None = None
-    if path.exists() and added:
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        backup = path.with_name(f"{path.name}.backup-{stamp}")
-        backup.write_bytes(path.read_bytes())
-    if added:
-        temporary = path.with_suffix(path.suffix + ".tmp")
-        temporary.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
-    return backup, added
-
-
 async def run_server(args: argparse.Namespace) -> int:
     loop = asyncio.get_running_loop()
+    if args.install_integrations:
+        try:
+            results = reconcile_integrations("auto")
+            for result in results:
+                action = "updated" if result.changed else "current"
+                LOGGER.info("%s integration is %s (%s)", result.display_name, action, result.path)
+        except (OSError, ValueError) as exc:
+            LOGGER.warning("Could not update agent integrations: %s", exc)
+
     writer = DeviceWriter(args.transport, args.ble_address, args.serial_port)
-    bridge = Bridge(writer)
-    udp_transport, _ = await loop.create_datagram_endpoint(
-        lambda: UdpBridgeProtocol(bridge), local_addr=(args.host, args.port)
-    )
-    writer_task = asyncio.create_task(writer.run())
-    print(f"DualKey bridge listening on udp://{args.host}:{args.port} (transport={args.transport}).")
+    shutdown_event = asyncio.Event()
+    bridge = Bridge(writer, shutdown_event.set)
     try:
-        await asyncio.Future()
+        udp_transport, _ = await loop.create_datagram_endpoint(
+            lambda: UdpBridgeProtocol(bridge), local_addr=(args.host, args.port)
+        )
+    except OSError as exc:
+        try:
+            send_request({"op": "status"}, args.host, args.port, 0.25)
+        except Exception:
+            raise BridgeError(
+                f"cannot listen on udp://{args.host}:{args.port}: {exc}"
+            ) from exc
+        LOGGER.info("A DualKey bridge is already running; leaving it in control of the device.")
+        return 0
+    writer_task = asyncio.create_task(writer.run())
+    LOGGER.info(
+        "DualKey bridge listening on udp://%s:%s (transport=%s).",
+        args.host,
+        args.port,
+        args.transport,
+    )
+    try:
+        await shutdown_event.wait()
     except (KeyboardInterrupt, asyncio.CancelledError):
         pass
     finally:
@@ -629,66 +642,143 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     serve = subparsers.add_parser("serve", help="run the persistent BLE/USB bridge")
-    serve.add_argument("--transport", choices=("auto", "ble", "usb"), default="ble")
+    serve.add_argument("--transport", choices=("auto", "ble", "usb"), default="auto")
     serve.add_argument("--ble-address", help="optional BLE address; normally auto-discovered")
     serve.add_argument("--serial-port", help="optional USB serial port, for example COM5")
+    serve.add_argument(
+        "--install-integrations",
+        action="store_true",
+        help="detect agents and reconcile their hooks before serving",
+    )
+    serve.add_argument("--log-file", type=Path, help="write rotating bridge logs to this file")
 
     set_parser = subparsers.add_parser("set", help="set a signal directly")
     set_parser.add_argument("state", choices=sorted(PUBLIC_STATES))
     set_parser.add_argument("--session", default="manual")
 
-    hook = subparsers.add_parser("hook", help="accept a Codex/Claude hook event")
+    hook = subparsers.add_parser("hook", help="accept an agent lifecycle hook event")
     hook.add_argument("event", nargs="?")
     hook.add_argument("--session")
+    hook.add_argument(
+        "--agent",
+        default="unknown",
+        help="agent namespace supplied by the installed integration",
+    )
 
     clear = subparsers.add_parser("clear", help="clear all state or one session")
     clear.add_argument("--session")
 
     subparsers.add_parser("status", help="show bridge, transport, and session status")
+    subparsers.add_parser("shutdown", help="stop the running bridge")
 
-    install = subparsers.add_parser("install-hooks", help="merge hooks into Codex hooks.json")
+    integrations = subparsers.add_parser(
+        "install-integrations", help="detect agents and install or update their hooks"
+    )
+    integrations.add_argument(
+        "--agents",
+        default="auto",
+        help="auto, all, or a comma-separated list: codex,claude,gemini",
+    )
+
+    uninstall = subparsers.add_parser(
+        "uninstall-integrations", help="remove DualKey hooks while preserving other settings"
+    )
+    uninstall.add_argument(
+        "--agents",
+        default="all",
+        help="all or a comma-separated list: codex,claude,gemini",
+    )
+
+    subparsers.add_parser("detect-agents", help="list detected supported agent environments")
+
+    install = subparsers.add_parser(
+        "install-hooks", help="deprecated alias for installing Codex hooks only"
+    )
     install.add_argument(
         "--codex-path", type=Path, default=Path.home() / ".codex" / "hooks.json"
     )
     return parser
 
 
+def print_integration_results(results: list[Any], installing: bool) -> None:
+    if not results:
+        console_write("No supported agent environment was detected.")
+        return
+    for result in results:
+        if result.changed:
+            action = "Installed/updated" if installing else "Removed"
+        else:
+            action = "Already current" if installing else "Not installed"
+        console_write(f"{action}: {result.display_name} ({result.path})")
+        if result.backup:
+            console_write(f"Backup: {result.backup}")
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         if args.command == "serve":
+            log_file = args.log_file
+            if log_file is None and getattr(sys, "frozen", False):
+                log_file = STATE_DIR / "bridge.log"
+            configure_logging(log_file)
             return asyncio.run(run_server(args))
         if args.command == "set":
             request = {"op": "set", "state": args.state, "session": args.session}
-            print(json.dumps(send_request(request, args.host, args.port, 1.0), ensure_ascii=False, indent=2))
+            console_write(
+                json.dumps(send_request(request, args.host, args.port, 1.0), ensure_ascii=False, indent=2)
+            )
             return 0
         if args.command == "hook":
             payload = read_stdin_payload()
             event = args.event or event_from_payload(payload) or "Stop"
-            session = args.session or session_from_payload(payload)
+            raw_session = args.session or session_from_payload(payload)
+            session = f"{args.agent}:{raw_session}"
             request = {"op": "hook", "event": event, "session": session, "payload": payload}
             try:
                 send_request(request, args.host, args.port, 0.35)
             except (BridgeError, TimeoutError, socket.timeout) as exc:
                 # Hooks must never stall or fail the agent itself.
-                print(f"DualKey bridge unavailable: {exc}", file=sys.stderr)
+                console_write(f"DualKey bridge unavailable: {exc}", error=True)
             return 0
         if args.command == "clear":
             request = {"op": "clear", "session": args.session}
-            print(json.dumps(send_request(request, args.host, args.port, 1.0), ensure_ascii=False, indent=2))
+            console_write(
+                json.dumps(send_request(request, args.host, args.port, 1.0), ensure_ascii=False, indent=2)
+            )
             return 0
         if args.command == "status":
             response = send_request({"op": "status"}, args.host, args.port, 1.0)
-            print(json.dumps(response, ensure_ascii=False, indent=2))
+            console_write(json.dumps(response, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "shutdown":
+            response = send_request({"op": "shutdown"}, args.host, args.port, 1.0)
+            console_write(json.dumps(response, ensure_ascii=False, indent=2))
+            return 0
+        if args.command == "detect-agents":
+            detected = detect_agents()
+            if detected:
+                for adapter in detected:
+                    console_write(f"{adapter.key}: {adapter.display_name}")
+            else:
+                console_write("No supported agent environment was detected.")
+            return 0
+        if args.command == "install-integrations":
+            results = reconcile_integrations(args.agents, install=True)
+            print_integration_results(results, True)
+            return 0
+        if args.command == "uninstall-integrations":
+            results = reconcile_integrations(args.agents, install=False)
+            print_integration_results(results, False)
             return 0
         if args.command == "install-hooks":
             backup, added = install_codex_hooks(args.codex_path)
-            print(f"Installed {added} DualKey hook entries in {args.codex_path}.")
+            console_write(f"Installed {added} DualKey hook entries in {args.codex_path}.")
             if backup:
-                print(f"Backup: {backup}")
+                console_write(f"Backup: {backup}")
             return 0
-    except (BridgeError, OSError, socket.timeout) as exc:
-        print(f"error: {exc}", file=sys.stderr)
+    except (BridgeError, OSError, ValueError, socket.timeout) as exc:
+        console_write(f"error: {exc}", error=True)
         return 2
     return 0
 
