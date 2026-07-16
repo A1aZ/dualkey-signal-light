@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 from logging.handlers import RotatingFileHandler
@@ -24,7 +25,7 @@ from integrations import (
 )
 
 
-VERSION = "0.2.0"
+VERSION = "0.2.1"
 DEVICE_NAME = "DualKey Signal Light"
 SERVICE_UUID = "7b7f3d10-7d20-4b8e-a2d7-4d55414c0001"
 RX_UUID = "7b7f3d10-7d20-4b8e-a2d7-4d55414c0002"
@@ -165,6 +166,116 @@ def session_from_payload(payload: dict[str, Any]) -> str:
             return os.environ[key].strip()
     workspace = _first_string(payload, {"cwd", "workspace", "workspace_dir", "project_dir"})
     return f"cwd:{workspace}" if workspace else "global"
+
+
+# Hook payloads arrive from the agent's own process (Claude Code, Codex,
+# Gemini CLI, ...) and can legitimately contain large tool input/output.
+# None of that content is needed to decide a signal-light state, and forwarding
+# it verbatim over the UDP transport risks EMSGSIZE ("Message too long") once a
+# single hook payload exceeds the local datagram size limit. Only a small,
+# explicitly-allow-listed subset of fields is ever placed on the wire.
+_EXPLICIT_SIGNAL_KEYS = {"signal", "signal_name", "lamp_signal"}
+_EXIT_STATUS_KEYS = {"exit_status", "exit_code", "return_code", "returncode"}
+_FAILURE_VALUE_KEYS = {"status", "state", "result"}
+_FAILURE_PRESENCE_KEYS = {"error", "failure", "exception"}
+_HOOK_SIGNAL_KEYS = (
+    _EXPLICIT_SIGNAL_KEYS
+    | _EXIT_STATUS_KEYS
+    | _FAILURE_VALUE_KEYS
+    | _FAILURE_PRESENCE_KEYS
+)
+_FAILURE_VALUES = {"error", "failed", "failure", "exception", "blocked"}
+_MAX_HOOK_FIELD_CHARS = 200
+_MAX_SESSION_CHARS = 160
+MAX_HOOK_ENVELOPE_BYTES = 4096
+_MISSING = object()
+
+
+def _truncate_text(value: str, limit: int = _MAX_HOOK_FIELD_CHARS) -> str:
+    value = value.strip()
+    return value if len(value) <= limit else value[:limit]
+
+
+def bounded_session(value: str) -> str:
+    """Keep the top-level UDP session key stable and bounded."""
+    value = value.strip()
+    if len(value) <= _MAX_SESSION_CHARS:
+        return value
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+    return f"{value[:_MAX_SESSION_CHARS]}:{digest}"
+
+
+def _safe_signal_value(key: str, value: Any) -> Any:
+    """Return only the decision semantic for a signal or failure field.
+
+    Error messages and successful tool results can contain user data. The
+    bridge only needs to know whether they indicate failure, not their text.
+    """
+    if key in _EXPLICIT_SIGNAL_KEYS:
+        if isinstance(value, str) and value.strip().lower() in PUBLIC_STATES:
+            return value.strip().lower()
+        return _MISSING
+    if key in _EXIT_STATUS_KEYS:
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip()
+            digits = normalized.lstrip("-")
+            if digits.isdigit():
+                return 0 if not digits.strip("0") else 1
+        return _MISSING
+    if key in _FAILURE_VALUE_KEYS:
+        if isinstance(value, str) and value.strip().lower() in _FAILURE_VALUES:
+            return value.strip().lower()
+        return _MISSING
+    if key in _FAILURE_PRESENCE_KEYS and value not in (None, False, "", 0, [], {}):
+        return True
+    return _MISSING
+
+
+def _extract_signal_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    """Extract failure semantics without forwarding messages or tool output."""
+    found: dict[str, Any] = {}
+    for raw_key, value in _walk_values(payload):
+        key = raw_key.lower()
+        if key not in _HOOK_SIGNAL_KEYS:
+            continue
+        safe_value = _safe_signal_value(key, value)
+        if safe_value is _MISSING:
+            continue
+        if key in _EXPLICIT_SIGNAL_KEYS:
+            found.setdefault(key, safe_value)
+            continue
+        if key in _EXIT_STATUS_KEYS:
+            is_nonzero = safe_value != 0
+            existing = found.get(key, _MISSING)
+            if existing is _MISSING or (is_nonzero and existing == 0):
+                found[key] = safe_value
+            continue
+        # These keys are emitted only when they already encode a failure.
+        found[key] = safe_value
+    return found
+
+
+def build_hook_envelope(payload: dict[str, Any]) -> dict[str, Any]:
+    """Build a bounded, transport-safe subset of a hook payload.
+
+    Only decision-relevant fields and a bounded tool name are preserved.
+    Prompts, file contents, attachments, and full tool input/output are always
+    excluded so a single hook payload cannot overflow the UDP transport.
+    """
+    envelope = _extract_signal_fields(payload)
+
+    tool_name = payload.get("tool_name")
+    if isinstance(tool_name, str) and tool_name.strip():
+        envelope["tool_name"] = _truncate_text(tool_name)
+
+    encoded_size = len(json.dumps(envelope, ensure_ascii=False).encode("utf-8"))
+    if encoded_size > MAX_HOOK_ENVELOPE_BYTES:
+        # Defense in depth: field-level truncation above should already make
+        # this unreachable, but decision-relevant signals always win.
+        envelope = _extract_signal_fields(payload)
+    return envelope
 
 
 @dataclass(frozen=True)
@@ -730,15 +841,19 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
         if args.command == "hook":
-            payload = read_stdin_payload()
-            event = args.event or event_from_payload(payload) or "Stop"
-            raw_session = args.session or session_from_payload(payload)
-            session = f"{args.agent}:{raw_session}"
-            request = {"op": "hook", "event": event, "session": session, "payload": payload}
             try:
+                payload = read_stdin_payload()
+                event = args.event or event_from_payload(payload) or "Stop"
+                raw_session = args.session or session_from_payload(payload)
+                session = f"{bounded_session(args.agent)}:{bounded_session(raw_session)}"
+                # Only a bounded, safe subset of the payload ever goes over the
+                # wire -- see build_hook_envelope for what is/isn't included.
+                envelope = build_hook_envelope(payload)
+                request = {"op": "hook", "event": event, "session": session, "payload": envelope}
                 send_request(request, args.host, args.port, 0.35)
-            except (BridgeError, TimeoutError, socket.timeout) as exc:
-                # Hooks must never stall or fail the agent itself.
+            except Exception as exc:
+                # Hooks must never stall or fail the agent itself. This branch
+                # only performs the lamp side effect, so failing open is safe.
                 console_write(f"DualKey bridge unavailable: {exc}", error=True)
             return 0
         if args.command == "clear":

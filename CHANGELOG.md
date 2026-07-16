@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.2.1] - 2026-07-16
+
+### Fixed
+
+- Reduced lifecycle-hook events to a bounded status envelope before local UDP delivery.
+- Prevented large tool inputs, outputs, and session identifiers from exceeding datagram limits.
+- Made hook-side bridge and transport failures fail open so lamp updates cannot block coding agents.
+- Stopped forwarding prompts, file contents, attachments, complete tool inputs, or tool outputs through local bridge IPC.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added
